@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>The Endless Hallway</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: Courier New, monospace; }
+        #ui {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            text-align: center;
+            pointer-events: none;
+            z-index: 10;
+        }
+        h1 { font-size: 40px; text-shadow: 0 0 10px red; }
+        p { font-size: 20px; }
+        #deathScreen {
+            display: none;
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: red;
+            z-index: 20;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        #score {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-size: 24px;
+            z-index: 5;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="score">Depth: 0m</div>
+
+    <div id="ui">
+        <h1>THE ENDLESS HALLWAY</h1>
+        <p>Click to Start</p>
+        <p>WASD to Move | SHIFT to Run</p>
+        <p>WARNING: If the fog turns RED, hug the walls.</p>
+    </div>
+
+    <div id="deathScreen">
+        <h1 style="color:black">YOU DIED</h1>
+        <p style="color:black">Press F5 to Restart</p>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 1. SETUP THE SCENE ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.03); // The darkness
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // --- 2. LIGHTING (The Flashlight) ---
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.5); // Dim ambient
+        scene.add(ambientLight);
+
+        const flashlight = new THREE.SpotLight(0xffffff, 200);
+        flashlight.angle = 0.6;
+        flashlight.penumbra = 0.5;
+        flashlight.decay = 2;
+        flashlight.distance = 50;
+        flashlight.castShadow = true;
+        camera.add(flashlight); // Attach light to player
+        scene.add(camera);
+
+        // Target for flashlight to point at
+        const lightTarget = new THREE.Object3D();
+        lightTarget.position.set(0, 0, -10);
+        camera.add(lightTarget);
+        flashlight.target = lightTarget;
+
+        // --- 3. GENERATE THE INFINITE HALLWAY ---
+        const corridorWidth = 10;
+        const corridorHeight = 8;
+        const segmentLength = 20;
+        let segments = [];
+        let playerDepth = 0;
+
+        const textureLoader = new THREE.TextureLoader();
+        
+        // Materials (Procedural simple colors to avoid external image errors)
+        const wallMat = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.8 });
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 });
+        const ceilingMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+
+        function createSegment(zPos) {
+            const segmentGroup = new THREE.Group();
+
+            // Floor
+            const floor = new THREE.Mesh(new THREE.BoxGeometry(corridorWidth, 0.1, segmentLength), floorMat);
+            floor.position.set(0, 0, zPos);
+            floor.receiveShadow = true;
+            segmentGroup.add(floor);
+
+            // Ceiling
+            const ceiling = new THREE.Mesh(new THREE.BoxGeometry(corridorWidth, 0.1, segmentLength), ceilingMat);
+            ceiling.position.set(0, corridorHeight, zPos);
+            segmentGroup.add(ceiling);
+
+            // Left Wall
+            const wallL = new THREE.Mesh(new THREE.BoxGeometry(0.1, corridorHeight, segmentLength), wallMat);
+            wallL.position.set(-corridorWidth / 2, corridorHeight / 2, zPos);
+            wallL.castShadow = true;
+            wallL.receiveShadow = true;
+            segmentGroup.add(wallL);
+
+            // Right Wall
+            const wallR = new THREE.Mesh(new THREE.BoxGeometry(0.1, corridorHeight, segmentLength), wallMat);
+            wallR.position.set(corridorWidth / 2, corridorHeight / 2, zPos);
+            wallR.castShadow = true;
+            wallR.receiveShadow = true;
+            segmentGroup.add(wallR);
+
+            // Obstacles (Crates) - Randomly placed
+            if (Math.random() > 0.5) {
+                const crateSize = 2;
+                const crate = new THREE.Mesh(new THREE.BoxGeometry(crateSize, crateSize, crateSize), new THREE.MeshStandardMaterial({color: 0x8B4513}));
+                // Randomize position (Left, Center, or Right)
+                const xPos = (Math.random() - 0.5) * (corridorWidth - 3); 
+                crate.position.set(xPos, crateSize/2, zPos);
+                crate.castShadow = true;
+                segmentGroup.add(crate);
+            }
+
+            scene.add(segmentGroup);
+            segments.push(segmentGroup);
+
+            // Cleanup old segments to save memory
+            if (segments.length > 20) {
+                const old = segments.shift();
+                scene.remove(old);
+            }
+        }
+
+        // Init initial hallway
+        for (let i = 0; i < 10; i++) {
+            createSegment(i * -segmentLength);
+        }
+
+        // --- 4. PLAYER MOVEMENT & CONTROLS ---
+        const moveSpeed = 0.1;
+        const runSpeed = 0.2;
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        let isRunning = false;
+        let isDead = false;
+
+        // Pointer Lock (Click to look around)
+        const ui = document.getElementById('ui');
+        document.body.addEventListener('click', () => {
+            if (!isDead) document.body.requestPointerLock();
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            if (document.pointerLockElement === document.body) {
+                ui.style.display = 'none';
+            } else {
+                if(!isDead) ui.style.display = 'block';
+            }
+        });
+
+        document.addEventListener('mousemove', (event) => {
+            if (document.pointerLockElement === document.body) {
+                camera.rotation.y -= event.movementX * 0.002;
+                // Clamp looking up/down
+                // (Simplified for this version to just Y rotation to avoid Gimbal lock complexity in one file)
+            }
+        });
+
+        // Key Listeners
+        const onKeyDown = function (event) {
+            switch (event.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'ShiftLeft': isRunning = true; break;
+            }
+        };
+        const onKeyUp = function (event) {
+            switch (event.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyD': moveRight = false; break;
+                case 'ShiftLeft': isRunning = false; break;
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keyup', onKeyUp);
+
+        // --- 5. THE ENTITY (THE MONSTER) ---
+        const entityGeometry = new THREE.SphereGeometry(2, 32, 32);
+        const entityMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const entity = new THREE.Mesh(entityGeometry, entityMaterial);
+        entity.position.set(0, -100, 0); // Hide initially
+        
+        // Add a "Face" light to the entity
+        const entityLight = new THREE.PointLight(0xff0000, 50, 20);
+        entity.add(entityLight);
+        scene.add(entity);
+
+        let entityState = "IDLE"; // IDLE, WARNING, ATTACKING
+        let entityTimer = 0;
+        let entitySpeed = 1.0;
+
+        // --- 6. GAME LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            if (isDead) return;
+
+            // -- MOVEMENT LOGIC --
+            direction.z = Number(moveForward) - Number(moveBackward);
+            direction.x = Number(moveRight) - Number(moveLeft);
+            direction.normalize();
+
+            const speed = isRunning ? runSpeed : moveSpeed;
+
+            if (moveForward || moveBackward) velocity.z -= direction.z * speed;
+            if (moveLeft || moveRight) velocity.x -= direction.x * speed;
+
+            // Apply Movement (Simple FPS style)
+            camera.translateX(-velocity.x);
+            camera.translateZ(-velocity.z); // Local space
+            
+            // Lock Y height (don't fly)
+            camera.position.y = 3; 
+
+            // Clamp X (Walls)
+            if (camera.position.x > (corridorWidth/2 - 1)) camera.position.x = (corridorWidth/2 - 1);
+            if (camera.position.x < -(corridorWidth/2 - 1)) camera.position.x = -(corridorWidth/2 - 1);
+
+            velocity.set(0,0,0); // Reset velocity for next frame (snappy movement)
+
+            // -- GENERATION LOGIC --
+            // If player moves deeper (negative Z), generate more
+            if (camera.position.z < - (segments.length * segmentLength) + 100) {
+                createSegment(- (segments.length * segmentLength));
+                // Update score
+                playerDepth = Math.floor(Math.abs(camera.position.z));
+                document.getElementById('score').innerText = `Depth: ${playerDepth}m`;
+            }
+
+            // -- MONSTER LOGIC --
+            entityTimer += 1;
+
+            if (entityState === "IDLE") {
+                scene.fog.color.setHex(0x000000); // Black fog
+                if (Math.random() < 0.005 && playerDepth > 50) { // Random chance after 50m
+                    entityState = "WARNING";
+                    entityTimer = 0;
+                }
+            } 
+            else if (entityState === "WARNING") {
+                // Flash fog red
+                const redVal = (Math.sin(entityTimer * 0.1) + 1) / 2 * 0.5;
+                scene.fog.color.setRGB(redVal, 0, 0);
+
+                if (entityTimer > 180) { // 3 seconds warning
+                    entityState = "ATTACKING";
+                    // Spawn entity way behind player
+                    entity.position.set(0, 3, camera.position.z + 50);
+                    // Or spawn ahead? Let's spawn behind like DOORS Rush
+                    entity.position.z = camera.position.z + 80; 
+                }
+            } 
+            else if (entityState === "ATTACKING") {
+                scene.fog.color.setHex(0x550000); // Dark red fog
+                
+                // Move entity forward (negative Z) very fast
+                entity.position.z -= 2.0;
+
+                // Shake camera
+                camera.position.y = 3 + (Math.random() * 0.2);
+
+                // Collision Check
+                const dist = camera.position.z - entity.position.z;
+                
+                // If entity passes player
+                if (Math.abs(dist) < 5) {
+                    // Check if player is hiding (hugging walls)
+                    // If player X is NOT near the wall (0 is center)
+                    if (Math.abs(camera.position.x) < (corridorWidth/2 - 2.5)) {
+                        // DEATH
+                        isDead = true;
+                        document.getElementById('deathScreen').style.display = 'flex';
+                        document.exitPointerLock();
+                    }
+                }
+
+                // If entity goes too far, reset
+                if (entity.position.z < camera.position.z - 50) {
+                    entityState = "IDLE";
+                    entity.position.y = -100; // Hide it
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
